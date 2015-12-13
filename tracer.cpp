@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809
-
+#undef _GNU_SOURCE
+#include <bits/stdc++.h>
 #include <sys/stat.h>
 #include <sys/user.h>
 #include <sys/ptrace.h>
@@ -13,6 +14,13 @@
 #include <elf.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+
+void fullwrite(int fd, char *buf, int len) {
+    size_t size = 0;
+    while (size < len)
+        size += write(fd, buf + size, len - size);
+}
+
 
 // Нам понадобится обработка ошибок. Чтобы не писать её на каждый чих, заведём пару полезных функций
 
@@ -64,10 +72,9 @@ void perror_and_exit(const char* msg, const char* file, int line) {
 #else
 #   error "ASSERT already defined"
 #endif
-
 // Это на самом деле тупо два указателя на начало и конец кода для инъекции, см. payload.S
-extern void PAYLOAD_AMD64();
-extern void PAYLOAD_AMD64_END();
+extern "C" void* PAYLOAD_AMD64_MMAP(size_t*);
+extern "C" void* PayloadTrampHello(size_t* sz);
 
 // Макрос для округления размера в большую сторону
 #define ALIGN_UP(size, alignment) (((size) + (alignment) - 1) / (alignment) * (alignment))
@@ -88,7 +95,7 @@ int64_t get_x86_64_linux_victim_entry_point(const char* name) {
 
     // интерпретируем начало файла как заголовок эльфа
     const Elf64_Ehdr* ehdr = (const Elf64_Ehdr*)fmem;
-    const char* ident = ehdr->e_ident;
+    const char* ident = (const char*)ehdr->e_ident;
 
     // проверим, что правда эльф и тот что надо эльф
     ASSERT(!strncmp(ident, ELFMAG, SELFMAG), "not an ELF");
@@ -98,7 +105,7 @@ int64_t get_x86_64_linux_victim_entry_point(const char* name) {
            ELFOSABI_LINUX == ident[EI_OSABI], "unsupported ELF");
     ASSERT(0 == ident[EI_ABIVERSION], "unsupported ELF");
     ASSERT(EM_X86_64 == ehdr->e_machine, "unsupported ELF");
-    ASSERT(ET_EXEC == ehdr->e_type, "unsupported ELF");
+    ASSERT(ET_EXEC == ehdr->e_type,"unsupported ELF");
     ASSERT(0 != ehdr->e_entry, "unsupported ELF");
 
     int64_t entry = ehdr->e_entry;
@@ -110,6 +117,11 @@ int64_t get_x86_64_linux_victim_entry_point(const char* name) {
 }
 
 int main(int argc, char** argv) {
+    int fds[2];
+    pipe(fds);
+    dup2(fds[1], 511);
+    int fd = open("code", O_CREAT | O_RDWR | O_TRUNC, 0777);
+    dup2(fd, 512);
     // Вот тут в будущем нужна нормальная обработка параметров командной строки, но пока так
     if (argc < 2 || !strcmp(argv[1], "--help")) {
         printf("usage: %s <tracee> <tracee options>...\n", argv[0]);
@@ -138,13 +150,66 @@ int main(int argc, char** argv) {
         ASSERT_SYSCALL(res_wait = waitpid(child, &wait_status, 0), -1 != res_wait);
 
         // Ребёнок не остановился, вместо этого с ним случилась какая-то другая фигня
-        char * txt = (char*)f.ptr_;
         ASSERT(WIFSTOPPED(wait_status), "unexpected status (%d)", wait_status);
 
         // Получаем точку входа жертвы
         const int64_t entry = get_x86_64_linux_victim_entry_point(victim_name);
+// прыгаем из функции в трамплин который напишем дальше в ту память которая уже замаплена
+        // saving main prologue
+        uintptr_t mainptr = 0x40052d;
 
-        const size_t payload_size = (const char*)PAYLOAD_AMD64_END - (const char*)PAYLOAD_AMD64;
+        long buf[2]; // 16 bytes
+        for(int i = 0; i < 2; i++) {
+            buf[i] = ptrace(PTRACE_PEEKTEXT, child, mainptr + sizeof(long) * i, NULL);
+        }
+
+        char jump[sizeof(buf)]; // 16 bytes
+        memcpy(jump, buf, sizeof(buf));
+        jump[0] = 0xe9;
+        uintptr_t aim = 0x10000 - (mainptr + 5);
+        memcpy(jump + 1, &aim, 4);
+        jump[5] = 0x90;
+        jump[6] = 0x90;
+        jump[7] = 0x90;
+        jump[8] = 0x90;
+
+        for(int i = 0; i < 2; i++) {
+            long p;
+            memcpy(&p, jump + i * sizeof(long), sizeof(long));
+            ptrace(PTRACE_POKETEXT, child, (void*)(mainptr + sizeof(long) * i), (void*)p);
+        }
+
+        //готовим файлик который хочется замапить, и канал между ребенком и отцом
+
+        close(fd);
+        close(fds[1]);
+
+        size_t tramp_size;
+        char *tramp_ptr = (char*)PayloadTrampHello(&tramp_size);
+        //printf("0x%lx\n", tramp_ptr);
+        //std::string code = "";
+        //...
+        fullwrite(512, tramp_ptr, tramp_size);
+        char tramplin_end[sizeof(buf)]; // 16 bytes
+        //здесь надо взять адрес функции, положить его на стек
+        //потом позвать какую-то функцию, которую надо написать в трамплин в начало(на адрес 0х10000)
+        //починить стек
+        //все это надо просто взять определённым машинным кодом, который надо скомпилировать отдельно и потом \
+        брать и менять только адрес при записи в наш бинарник, который мы будем мапить
+        memcpy(tramplin_end, buf, sizeof(buf));
+        tramplin_end[9] = 0xe9;
+        aim = mainptr - 0x10000 - 5 - tramp_size;
+        memcpy(tramplin_end + 10, &aim, 4);
+        fullwrite(512, tramplin_end, 16);
+        //fsync(512);
+        /*for(int i = 0; i < 2; ++i) { // sizeof(long)
+            long p;
+            memcpy(&p, tramplin_end + i * sizeof(long), sizeof(long));
+            ptrace(PTRACE_POKETEXT, child, mem + sizeof(long) * i, (void*)p);
+        }*/
+
+        size_t payload_size;
+        void *payload_ptr = PAYLOAD_AMD64_MMAP(&payload_size);
         // Нам нужно сохранить код, который мы сейчас затрём в жертве.
         // Для этого заведём буфер достаточного размера и наполним его смыслом.
         long victim_text[ALIGN_UP(payload_size, sizeof(long)) / sizeof(long)];
@@ -152,11 +217,13 @@ int main(int argc, char** argv) {
         struct user_regs_struct victim_regs;
 
         // Сразу скопируем инжектируемый код в массив, чтобы дальше просто поменять местами его с кодом жертвы
-        memcpy(victim_text, (void*)PAYLOAD_AMD64, payload_size);
+        memcpy(victim_text, payload_ptr, payload_size);
 
-        // Меняем по sizeof(unsigned) байт, так уж ptrace работает
+
+
+        // Меняем по sizeof(long) байт, так уж ptrace работает
         for (size_t i = 0; i < ARRAY_SIZE(victim_text); ++i) {
-            void* addr = (void*)entry + sizeof(long) * i;
+            void* addr = (char*)entry + sizeof(long) * i;
             void* data = (void*)victim_text[i];
 
             ASSERT_SYSCALL(long victim_word = ptrace(PTRACE_PEEKTEXT, child, addr, NULL), -1 != victim_word || !errno);
@@ -177,10 +244,6 @@ int main(int argc, char** argv) {
         // Сохраняем регистры жертвы
         ASSERT_SYSCALL(res_ptrace = ptrace(PTRACE_GETREGS, child, NULL, &victim_regs), -1 != res_ptrace);
 
-        // Но нужно ещё починить rip жертвы, он смотрит на следующую инструкцию после брейкпоинта
-        // Сделаем, чтобы rip смотрел на точку входа.
-        victim_regs.rip = entry;
-
         // Отпускаем жертву до второго брейкпоинта (xCC в инъекции)
         ASSERT_SYSCALL(res_ptrace = ptrace(PTRACE_CONT, child, NULL, NULL), -1 != res_ptrace);
 
@@ -191,26 +254,43 @@ int main(int argc, char** argv) {
             ASSERT(!WIFSIGNALED(wait_status), "child died with signal %d", WTERMSIG(wait_status));
         } while (!WIFSTOPPED(wait_status));
 
+        struct user_regs_struct regs;
+        ASSERT_SYSCALL(res_ptrace = ptrace(PTRACE_GETREGS, child, NULL, &regs), -1 != res_ptrace);
+        printf("rax = 0x%016llx\n", regs.rax);
+
+
+        if (regs.rax != 0x10000) {
+            std::cout << "fail" << std::endl;
+            return 0;
+        }
+        //uintptr_t mem = regs.rax;
+        //uintptr_t mem = 0x10000;
         // Чиним код жертвы
         for (size_t i = 0; i < ARRAY_SIZE(victim_text); ++i) {
-            void* addr = (void*)entry + sizeof(long) * i;
-            void* data = (void*)victim_text[i];
+            void *addr = (char *) entry + sizeof(long) * i;
+            void *data = (void *) victim_text[i];
 
             ASSERT_SYSCALL(res_ptrace = ptrace(PTRACE_POKETEXT, child, addr, data), -1 != res_ptrace);
         }
 
+        // Но нужно ещё починить rip жертвы, он смотрит на следующую инструкцию после брейкпоинта
+        // Сделаем, чтобы rip смотрел на точку входа.
+        victim_regs.rip = entry;
         // Чиним регистры жертвы
         ASSERT_SYSCALL(res_ptrace = ptrace(PTRACE_SETREGS, child, NULL, &victim_regs), -1 != res_ptrace);
 
+
         // Отпускаем жертву в свободное плавание
-        ASSERT_SYSCALL(res_ptrace = ptrace(PTRACE_CONT, child, NULL, NULL), -1 != res_ptrace);
+        ASSERT_SYSCALL(res_ptrace = ptrace(PTRACE_DETACH, child, NULL, NULL), -1 != res_ptrace);
 
         // Ждём завершения жертвы.
         // Если операция прошла успешнно, жертва должна напечатать,
         // что она там хотела нам напечатать изначально, и выйти без ошибок
         do {
+            wait_status = 0;
             ASSERT_SYSCALL(res_wait = waitpid(child, &wait_status, 0), -1 != res_wait);
             ASSERT(!WIFSIGNALED(wait_status), "child died with signal %d", WTERMSIG(wait_status));
+            ASSERT(!WIFSTOPPED(wait_status), "child stopped with signal %d", WSTOPSIG(wait_status));
         } while (!WIFEXITED(wait_status));
     }
 }
