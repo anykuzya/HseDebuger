@@ -38,13 +38,6 @@ struct function {
     uintptr_t end;
 };
 
-/*struct Stab {
-    uintptr_t n_strx;   // позиция начала строки в секции .strstab
-    uint8_t n_type;    // тип отладочного символа
-    uint8_t n_other;   // прочая информация
-    uint16_t n_desc;   // описание отладочного символа
-    uintptr_t n_value; // значение отладочного символа
-};*/
 
 bool comp(const function & f1, const function & f2){
     int ind = strcmp(f1.name.c_str(), f2.name.c_str());
@@ -77,57 +70,7 @@ void listing(const Elf64_Sym * sym, const size_t size, const char * strtab) {
                 //    printf("%s 0x%lx\n", "not for us\n", current->st_value);
         }
     }
-}/*
-    Stab *current = (Stab *)stab;
-    const char * current_file = nullptr;
-    std::string name_fun;
-    std::vector<function> data;
-    function current_fun;
-    bool wait_sline = 1;
-    bool first = 1;
-    //char * end_name = NULL;
-    //std::cout << "new switch\n";
-    for (int i = 0; current < stab + stabsize/sizeof(Stab); current++, i++) {
-        //printf("0x%x\n", current->n_type);
-        switch (current->n_type) {
-            case N_SO:
-                current_file = (stabstr + current->n_strx);
-                if (!first){
-                    (data.end() - 1)->end = current->n_value;
-                }
-                if (!current->n_desc) {
-                    first = 1;
-                }
-                break;
-            case N_SOL:
-                current_file = (stabstr + current->n_strx);
-                if (wait_sline && !first)
-                (data.end() - 1)->source = current_file;
-                break;
-            case N_FUN:
-                if (!first) {
-                    (data.end() - 1)->end = current->n_value;
-                }
-                wait_sline = 1;
-                current_fun.index = i;
-                current_fun.start = current->n_value;
-                current_fun.source = current_file;
-                //current_fun.name = (char *) (stabstr + current->n_strx);
-                first = 0;
-                current_fun.name = std::string(stabstr + current->n_strx, strchr((stabstr + current->n_strx), ':'));
-                data.push_back(current_fun);
-                //end_name = NULL;
-                break;
-            case N_SLINE:
-                wait_sline = 0;
-                break;
-        }
-    }
-    std::sort(data.begin(), data.end(), comp);
-    for (auto fun : data) {
-        printf("%s %d 0x%08x 0x%08x %s\n", fun.name.c_str(), fun.index, fun.start, fun.end, fun.source);
-    }
-}*/
+}
 
 int main(int argc, char** argv) {
     elf_file Elf(argv[1]);
