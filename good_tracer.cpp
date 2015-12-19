@@ -302,7 +302,16 @@ int main(int argc, char** argv) {
         }*/
 
         code c;
-        c.brkp().syscall().brkp();
+        c.brkp()
+        		.mov((i32)9, rax)
+        		.mov((i32)0x10000, rdi)
+        		.mov((i64)symtab.size()*128, rsi)
+        		.mov((i32)5, rdx)
+        		.mov((i32)0, r9)
+        		.mov((i32)0x12, r10)
+        		.mov((i32)0x200, r8)
+        		.syscall()
+        		.brkp();
 
         size_t size = c.size();
         //void *payload_ptr = PAYLOAD_AMD64_MMAP(&payload_size);
@@ -342,15 +351,7 @@ int main(int argc, char** argv) {
 
         // Сохраняем регистры жертвы
         ASSERT_SYSCALL(res_ptrace = ptrace(PTRACE_GETREGS, child, NULL, &victim_regs), -1 != res_ptrace);
-        struct user_regs_struct inject_regs = victim_regs;
-        inject_regs.rax = 9;
-        inject_regs.rdx = 0x5;
-        inject_regs.rdi = 0x10000;
-        inject_regs.rsi = 0x1000;
-        inject_regs.r9 = 0;
-        inject_regs.r10 = 0x12;
-        inject_regs.r8 = 0x200;
-        ASSERT_SYSCALL(res_ptrace = ptrace(PTRACE_SETREGS, child, NULL, &inject_regs), -1 != res_ptrace);
+
 
 
         // Отпускаем жертву до второго брейкпоинта (xCC в инъекции)
